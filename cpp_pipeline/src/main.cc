@@ -29,10 +29,6 @@ static void dump_tensor_attr(rknn_tensor_attr *attr)
         int idx = strlen(dims);
         sprintf(&dims[idx], "%d%s", attr->dims[i], (i == attr->n_dims - 1) ? "" : ", ");
     }
-    // printf("  index=%d, name=%s, n_dims=%d, dims=[%s], n_elems=%d, size=%d, fmt=%s, type=%s, qnt_type=%s, "
-        //    "zp=%d, scale=%f\n",
-        //    attr->index, attr->name, attr->n_dims, dims, attr->n_elems, attr->size, get_format_string(attr->fmt),
-        //    get_type_string(attr->type), get_qnt_type_string(attr->qnt_type), attr->zp, attr->scale);
 }
 
 static void *load_file(const char *file_path, size_t *file_size)
@@ -90,16 +86,22 @@ static unsigned char *load_image(const char *image_path, rknn_tensor_attr *input
         req_channel = input_attr->dims[1];
         break;
     default:
-        printf("meet unsupported layout\n");
+        printf("meet unsupported layout: %d\n", input_attr->fmt);
         return NULL;
     }
 
     int channel = 0;
-
     unsigned char *image_data = stbi_load(image_path, img_width, img_height, &channel, req_channel);
     if (image_data == NULL)
     {
-        printf("load image failed: %s\n", image_path);
+        printf("load image failed: %s, reason: %s\n", image_path, stbi_failure_reason());
+        FILE* fp = fopen(image_path, "rb");
+        if (!fp) {
+            printf("Cannot open file %s for reading\n", image_path);
+        } else {
+            printf("File %s exists but failed to load as image\n", image_path);
+            fclose(fp);
+        }
         return NULL;
     }
 
@@ -151,6 +153,7 @@ int main(int argc, char *argv[])
     std::vector<RelDetection> detections_relative;
     std::pair<int, int> center_dims;
     std::tuple<float, float, float> vector;
+    char *preprocessed_image_path = NULL; // To store the new input path
     try {
         auto photos_result = read_photos_from_c_file(input_path);
         auto photos = photos_result.first;
@@ -179,29 +182,47 @@ int main(int argc, char *argv[])
             printf("Error: preprocessed_image is empty\n");
             return -1;
         }
-
-        // Ensure preprocessed_image is CV_8UC3
         if (preprocessed_image.type() != CV_8UC3) {
             cv::Mat temp;
             preprocessed_image.convertTo(temp, CV_8UC3);
             preprocessed_image = temp;
+            if (preprocessed_image.empty()) {
+                printf("Error: Failed to convert preprocessed_image to CV_8UC3\n");
+                return -1;
+            }
             printf("Converted preprocessed_image to CV_8UC3\n");
         }
 
         // Save preprocessed image for RKNN input
+        std::string output_path = "./preprocessed_image.png";
         try {
-            if (!cv::imwrite("image.png", preprocessed_image)) {
-                printf("Error: Failed to write preprocessed_image.png\n");
+            std::remove(output_path.c_str()); // Remove existing file to avoid conflicts
+            if (!cv::imwrite(output_path, preprocessed_image)) {
+                printf("Error: Failed to write preprocessed_image.png to %s\n", output_path.c_str());
                 return -1;
             }
+            // Verify the file exists and is readable
+            FILE* fp = fopen(output_path.c_str(), "rb");
+            if (!fp) {
+                printf("Error: Cannot open preprocessed_image.png for reading after writing\n");
+                return -1;
+            }
+            fclose(fp);
+            printf("Successfully saved preprocessed_image.png\n");
+            // Create a persistent copy of the output path
+            preprocessed_image_path = strdup(output_path.c_str());
+            if (!preprocessed_image_path) {
+                printf("Error: Failed to allocate memory for preprocessed_image_path\n");
+                return -1;
+            }
+            input_path = preprocessed_image_path;
         } catch (const cv::Exception& e) {
             printf("Error saving preprocessed_image.png: %s\n", e.what());
             return -1;
         }
-
-        input_path = (char *)"preprocessed_image.png";
     } catch (const std::exception& e) {
         printf("Preprocessing failed: %s\n", e.what());
+        if (preprocessed_image_path) free(preprocessed_image_path);
         return -1;
     }
 
@@ -214,6 +235,7 @@ int main(int argc, char *argv[])
     void *model_data = load_file(model_path, &model_size);
     if (!model_data) {
         printf("Failed to load model file: %s\n", model_path);
+        if (preprocessed_image_path) free(preprocessed_image_path);
         return -1;
     }
 
@@ -221,6 +243,7 @@ int main(int argc, char *argv[])
     free(model_data);
     if (ret < 0) {
         printf("rknn_init fail! ret=%d\n", ret);
+        if (preprocessed_image_path) free(preprocessed_image_path);
         return -1;
     }
 
@@ -229,6 +252,7 @@ int main(int argc, char *argv[])
     if (ret != RKNN_SUCC) {
         printf("rknn_query fail! ret=%d\n", ret);
         rknn_destroy(ctx);
+        if (preprocessed_image_path) free(preprocessed_image_path);
         return -1;
     }
 
@@ -236,6 +260,7 @@ int main(int argc, char *argv[])
     if (io_num.n_output != 1 && io_num.n_output != 3) {
         printf("Error: Model output count must be 1 or 3, but got %d\n", io_num.n_output);
         rknn_destroy(ctx);
+        if (preprocessed_image_path) free(preprocessed_image_path);
         return -1;
     }
 
@@ -247,6 +272,7 @@ int main(int argc, char *argv[])
         if (ret < 0) {
             printf("rknn_query error! ret=%d\n", ret);
             rknn_destroy(ctx);
+            if (preprocessed_image_path) free(preprocessed_image_path);
             return -1;
         }
         dump_tensor_attr(&input_attrs[i]);
@@ -260,6 +286,7 @@ int main(int argc, char *argv[])
         if (ret != RKNN_SUCC) {
             printf("rknn_query fail! ret=%d\n", ret);
             rknn_destroy(ctx);
+            if (preprocessed_image_path) free(preprocessed_image_path);
             return -1;
         }
         dump_tensor_attr(&output_attrs[i]);
@@ -270,6 +297,7 @@ int main(int argc, char *argv[])
     if (ret != RKNN_SUCC) {
         printf("rknn_query fail! ret=%d\n", ret);
         rknn_destroy(ctx);
+        if (preprocessed_image_path) free(preprocessed_image_path);
         return -1;
     }
 
@@ -279,6 +307,7 @@ int main(int argc, char *argv[])
     if (!input_data) {
         printf("Failed to load image: %s\n", input_path);
         rknn_destroy(ctx);
+        if (preprocessed_image_path) free(preprocessed_image_path);
         return -1;
     }
 
@@ -292,6 +321,7 @@ int main(int argc, char *argv[])
         printf("Failed to create input memory\n");
         free(input_data);
         rknn_destroy(ctx);
+        if (preprocessed_image_path) free(preprocessed_image_path);
         return -1;
     }
 
@@ -325,6 +355,7 @@ int main(int argc, char *argv[])
             rknn_destroy_mem(ctx, input_mems[0]);
             free(input_data);
             rknn_destroy(ctx);
+            if (preprocessed_image_path) free(preprocessed_image_path);
             return -1;
         }
     }
@@ -338,6 +369,7 @@ int main(int argc, char *argv[])
         rknn_destroy_mem(ctx, input_mems[0]);
         free(input_data);
         rknn_destroy(ctx);
+        if (preprocessed_image_path) free(preprocessed_image_path);
         return -1;
     }
 
@@ -351,6 +383,7 @@ int main(int argc, char *argv[])
             rknn_destroy_mem(ctx, input_mems[0]);
             free(input_data);
             rknn_destroy(ctx);
+            if (preprocessed_image_path) free(preprocessed_image_path);
             return -1;
         }
     }
@@ -367,6 +400,7 @@ int main(int argc, char *argv[])
             rknn_destroy_mem(ctx, input_mems[0]);
             free(input_data);
             rknn_destroy(ctx);
+            if (preprocessed_image_path) free(preprocessed_image_path);
             return -1;
         }
     }
@@ -410,6 +444,7 @@ int main(int argc, char *argv[])
             rknn_destroy_mem(ctx, input_mems[0]);
             free(input_data);
             rknn_destroy(ctx);
+            if (preprocessed_image_path) free(preprocessed_image_path);
             return -1;
         }
     }
@@ -440,6 +475,7 @@ int main(int argc, char *argv[])
         rknn_destroy_mem(ctx, input_mems[0]);
         free(input_data);
         rknn_destroy(ctx);
+        if (preprocessed_image_path) free(preprocessed_image_path);
         return -1;
     }
 
@@ -452,6 +488,7 @@ int main(int argc, char *argv[])
         rknn_destroy_mem(ctx, input_mems[0]);
         free(input_data);
         rknn_destroy(ctx);
+        if (preprocessed_image_path) free(preprocessed_image_path);
         return -1;
     }
     cv::Mat to_save = preprocessed_image.clone();
@@ -463,6 +500,7 @@ int main(int argc, char *argv[])
         rknn_destroy_mem(ctx, input_mems[0]);
         free(input_data);
         rknn_destroy(ctx);
+        if (preprocessed_image_path) free(preprocessed_image_path);
         return -1;
     }
 
@@ -496,6 +534,7 @@ int main(int argc, char *argv[])
             rknn_destroy_mem(ctx, input_mems[0]);
             free(input_data);
             rknn_destroy(ctx);
+            if (preprocessed_image_path) free(preprocessed_image_path);
             return -1;
         }
     } else {
@@ -582,6 +621,7 @@ int main(int argc, char *argv[])
             rknn_destroy_mem(ctx, input_mems[0]);
             free(input_data);
             rknn_destroy(ctx);
+            if (preprocessed_image_path) free(preprocessed_image_path);
             return -1;
         }
         printf("Saving image: %s, rows=%d, cols=%d, type=%d\n", 
@@ -597,6 +637,7 @@ int main(int argc, char *argv[])
                 rknn_destroy_mem(ctx, input_mems[0]);
                 free(input_data);
                 rknn_destroy(ctx);
+                if (preprocessed_image_path) free(preprocessed_image_path);
                 return -1;
             }
             printf("Saved image as JPEG: %s\n", jpg_path);
@@ -605,9 +646,6 @@ int main(int argc, char *argv[])
             cv::Mat verify_output = cv::imread(output_image_path, cv::IMREAD_COLOR);
             if (verify_output.empty()) {
                 printf("Warning: Failed to read back output image: %s\n", output_image_path);
-            } else {
-                // printf("Verified output image: %s, rows=%d, cols=%d, type=%d\n", 
-                    //    output_image_path, verify_output.rows, verify_output.cols, verify_output.type());
             }
         }
     } catch (const cv::Exception& e) {
@@ -623,6 +661,7 @@ int main(int argc, char *argv[])
         rknn_destroy_mem(ctx, input_mems[0]);
         free(input_data);
         rknn_destroy(ctx);
+        if (preprocessed_image_path) free(preprocessed_image_path);
         return -1;
     }
 
@@ -645,6 +684,10 @@ int main(int argc, char *argv[])
         input_data = nullptr;
     }
     rknn_destroy(ctx);
+    if (preprocessed_image_path) {
+        free(preprocessed_image_path);
+        preprocessed_image_path = nullptr;
+    }
 
     return 0;
 }

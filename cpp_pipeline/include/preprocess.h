@@ -12,6 +12,8 @@
 #include <stdexcept>
 #include <cmath>
 #include <iostream>
+#include <string>
+#include <cstring>
 
 #define M_PI 3.14159265358979323846
 
@@ -164,74 +166,202 @@ RotationStrategy get_rotation_strategy(int center_face) {
     return strategies[center_face];
 }
 
+// std::pair<std::vector<cv::Mat>, std::vector<int>> read_photos_from_c_file(const std::string& file_path) {
+//     std::ifstream f(file_path);
+//     if (!f.is_open()) {
+//         throw std::runtime_error("Cannot open file: " + file_path);
+//     }
+//     std::string content((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
+//     std::regex re_ff("([-+]?\\d*\\.\\d+(?:[eE][-+]?\\d+)?)[fF]");
+//     content = std::regex_replace(content, re_ff, "$1");
+
+//     std::regex re_comment("//\\s*hs\\s*(\\d+\\w*)\\s*photo", std::regex_constants::icase);
+//     std::sregex_iterator iter_comment(content.begin(), content.end(), re_comment);
+//     std::sregex_iterator end;
+//     std::vector<int> face_numbers;
+//     for (; iter_comment != end; ++iter_comment) {
+//         std::string face_str = iter_comment->str(1);
+//         std::string numeric_part;
+//         for (char c : face_str) {
+//             if (std::isdigit(c)) {
+//                 numeric_part += c;
+//             } else {
+//                 break;
+//             }
+//         }
+//         try {
+//             if (!numeric_part.empty()) {
+//                 int face_num = std::stoi(numeric_part);
+//                 face_numbers.push_back(face_num);
+//             } else {
+//                 std::cerr << "Warning: Invalid face number in comment '" << iter_comment->str(0)
+//                           << "' in file " << file_path << ", skipping." << std::endl;
+//             }
+//         } catch (const std::exception& e) {
+//             std::cerr << "Warning: Failed to parse face number from comment '" << iter_comment->str(0)
+//                       << "' in file " << file_path << ": " << e.what() << ", skipping." << std::endl;
+//         }
+//     }
+
+//     std::regex re_array("\\{([^{}]*)\\}");
+//     std::sregex_iterator iter_array(content.begin(), content.end(), re_array);
+//     std::vector<cv::Mat> photos;
+//     std::vector<int> valid_face_numbers;
+//     int i = 0;
+//     for (; iter_array != end; ++iter_array) {
+//         std::string array_str = iter_array->str(1);
+//         std::stringstream ss(array_str);
+//         std::vector<float> numbers;
+//         float num;
+//         char ch;
+//         while (ss >> num) {
+//             numbers.push_back(num);
+//             if (ss.peek() == ',') ss >> ch;
+//         }
+//         if (numbers.size() == 768) {
+//             cv::Mat mat(24, 32, CV_32F);
+//             std::memcpy(mat.data, numbers.data(), 768 * sizeof(float));
+//             photos.push_back(mat);
+//             int face_num = (i < static_cast<int>(face_numbers.size())) ? face_numbers[i] : i + 1;
+//             valid_face_numbers.push_back(face_num);
+//         } else {
+//             std::cerr << "Warning: Array " << i << " in file " << file_path
+//                       << " has " << numbers.size() << " elements, expected 768, skipping." << std::endl;
+//         }
+//         i++;
+//     }
+//     if (photos.empty()) {
+//         throw std::runtime_error("No valid arrays found in file: " + file_path);
+//     }
+//     return std::make_pair(photos, valid_face_numbers);
+// }
+
 std::pair<std::vector<cv::Mat>, std::vector<int>> read_photos_from_c_file(const std::string& file_path) {
     std::ifstream f(file_path);
     if (!f.is_open()) {
         throw std::runtime_error("Cannot open file: " + file_path);
     }
-    std::string content((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
-    std::regex re_ff("([-+]?\\d*\\.\\d+(?:[eE][-+]?\\d+)?)[fF]");
-    content = std::regex_replace(content, re_ff, "$1");
 
-    std::regex re_comment("//\\s*hs\\s*(\\d+\\w*)\\s*photo", std::regex_constants::icase);
-    std::sregex_iterator iter_comment(content.begin(), content.end(), re_comment);
-    std::sregex_iterator end;
-    std::vector<int> face_numbers;
-    for (; iter_comment != end; ++iter_comment) {
-        std::string face_str = iter_comment->str(1);
-        std::string numeric_part;
-        for (char c : face_str) {
-            if (std::isdigit(c)) {
-                numeric_part += c;
-            } else {
-                break;
-            }
-        }
-        try {
-            if (!numeric_part.empty()) {
-                int face_num = std::stoi(numeric_part);
-                face_numbers.push_back(face_num);
-            } else {
-                std::cerr << "Warning: Invalid face number in comment '" << iter_comment->str(0)
-                          << "' in file " << file_path << ", skipping." << std::endl;
-            }
-        } catch (const std::exception& e) {
-            std::cerr << "Warning: Failed to parse face number from comment '" << iter_comment->str(0)
-                      << "' in file " << file_path << ": " << e.what() << ", skipping." << std::endl;
-        }
-    }
-
-    std::regex re_array("\\{([^{}]*)\\}");
-    std::sregex_iterator iter_array(content.begin(), content.end(), re_array);
     std::vector<cv::Mat> photos;
-    std::vector<int> valid_face_numbers;
-    int i = 0;
-    for (; iter_array != end; ++iter_array) {
-        std::string array_str = iter_array->str(1);
-        std::stringstream ss(array_str);
-        std::vector<float> numbers;
-        float num;
-        char ch;
-        while (ss >> num) {
-            numbers.push_back(num);
-            if (ss.peek() == ',') ss >> ch;
+    std::vector<int> face_numbers;
+    
+    std::string line;
+    std::vector<float> current_array;
+    current_array.reserve(768);
+    
+    bool in_photo_block = false;
+    int current_face_number = 1;
+    
+    while (std::getline(f, line)) {
+        // Удаляем начальные пробелы и табуляции
+        size_t first_char = line.find_first_not_of(" \t");
+        if (first_char == std::string::npos) continue;
+        
+        std::string trimmed_line = line.substr(first_char);
+        
+        // Поиск комментария с номером фото
+        if (trimmed_line.find("//") == 0) {
+            size_t hs_pos = trimmed_line.find("hs");
+            if (hs_pos != std::string::npos) {
+                // Извлекаем число после "hs"
+                size_t num_start = hs_pos + 2;
+                while (num_start < trimmed_line.length() && !std::isdigit(trimmed_line[num_start])) {
+                    num_start++;
+                }
+                
+                if (num_start < trimmed_line.length()) {
+                    size_t num_end = num_start;
+                    while (num_end < trimmed_line.length() && std::isdigit(trimmed_line[num_end])) {
+                        num_end++;
+                    }
+                    
+                    try {
+                        current_face_number = std::stoi(trimmed_line.substr(num_start, num_end - num_start));
+                        face_numbers.push_back(current_face_number);
+                        in_photo_block = true;
+                        current_array.clear();
+                    } catch (const std::exception& e) {
+                        std::cerr << "Warning: Failed to parse face number from line: " << line 
+                                  << " in file " << file_path << ": " << e.what() << std::endl;
+                    }
+                }
+            }
+            continue;
         }
-        if (numbers.size() == 768) {
-            cv::Mat mat(24, 32, CV_32F);
-            std::memcpy(mat.data, numbers.data(), 768 * sizeof(float));
-            photos.push_back(mat);
-            int face_num = (i < static_cast<int>(face_numbers.size())) ? face_numbers[i] : i + 1;
-            valid_face_numbers.push_back(face_num);
-        } else {
-            std::cerr << "Warning: Array " << i << " in file " << file_path
-                      << " has " << numbers.size() << " elements, expected 768, skipping." << std::endl;
+        
+        // Если мы внутри блока с фото и строка начинается с '{' или содержит числа
+        if (in_photo_block && (trimmed_line.find('{') != std::string::npos || 
+                               trimmed_line.find('.') != std::string::npos)) {
+            
+            // Обрабатываем строку с числами
+            std::string processed_line = trimmed_line;
+            
+            // Удаляем все ненужные символы (скобки, запятые, суффиксы f)
+            std::replace(processed_line.begin(), processed_line.end(), ',', ' ');
+            std::replace(processed_line.begin(), processed_line.end(), '{', ' ');
+            std::replace(processed_line.begin(), processed_line.end(), '}', ' ');
+            
+            // Удаляем суффиксы f/F
+            size_t pos = 0;
+            while ((pos = processed_line.find('f', pos)) != std::string::npos) {
+                processed_line.replace(pos, 1, " ");
+                pos++;
+            }
+            pos = 0;
+            while ((pos = processed_line.find('F', pos)) != std::string::npos) {
+                processed_line.replace(pos, 1, " ");
+                pos++;
+            }
+            
+            // Парсим числа из строки
+            std::stringstream ss(processed_line);
+            float num;
+            while (ss >> num) {
+                current_array.push_back(num);
+                
+                // Если массив заполнен, сохраняем его
+                if (current_array.size() == 768) {
+                    cv::Mat mat(24, 32, CV_32F);
+                    std::memcpy(mat.data, current_array.data(), 768 * sizeof(float));
+                    photos.push_back(mat);
+                    current_array.clear();
+                    in_photo_block = false;
+                    break;
+                }
+            }
         }
-        i++;
+        
+        // Проверяем, не закончился ли массив
+        if (trimmed_line.find('}') != std::string::npos && in_photo_block) {
+            if (current_array.size() != 768) {
+                std::cerr << "Warning: Array for face " << current_face_number << " in file " << file_path
+                          << " has " << current_array.size() << " elements, expected 768, skipping." << std::endl;
+            }
+            current_array.clear();
+            in_photo_block = false;
+        }
     }
+    
+    // Синхронизация количества фото и номеров
+    if (photos.size() != face_numbers.size()) {
+        std::cerr << "Warning: Number of photos (" << photos.size() 
+                  << ") doesn't match number of face numbers (" << face_numbers.size() 
+                  << ") in file " << file_path << std::endl;
+        
+        if (face_numbers.size() > photos.size()) {
+            face_numbers.resize(photos.size());
+        } else {
+            for (size_t i = face_numbers.size(); i < photos.size(); ++i) {
+                face_numbers.push_back(i + 1);
+            }
+        }
+    }
+    
     if (photos.empty()) {
         throw std::runtime_error("No valid arrays found in file: " + file_path);
     }
-    return std::make_pair(photos, valid_face_numbers);
+    
+    return std::make_pair(photos, face_numbers);
 }
 
 void add_to_canvas(cv::Mat& sum_canvas, cv::Mat& count_canvas, const cv::Mat& img, int y0, int x0) {
